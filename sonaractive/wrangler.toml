@@ -4,7 +4,7 @@ compatibility_date = "2026-10-10"
 workers_dev = true
 
 [vars]
-SITE_ORIGIN = "https://infinitylavascape.github.io/sonaractive.html"
+SITE_ORIGIN = "https://infinitylavascape.github.io"
 
 [[durable_objects.bindings]]
 name = "SONAR_QUEUE"
