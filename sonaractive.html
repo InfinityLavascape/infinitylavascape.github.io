@@ -37,7 +37,21 @@
               return;
             }
             audio.addEventListener("canplay", () => resolve(audio), { once: true });
-            audio.addEventListener("error", () => reject(new Error(`Could not load audio asset: ${assetName}`)), { once: true });
+            audio.addEventListener("error", () => {
+              const mediaError = audio.error;
+              const errorNames = {
+                1: "aborted",
+                2: "network error",
+                3: "decode error",
+                4: "unsupported format or source"
+              };
+              const reason = errorNames[mediaError?.code] || "unknown media error";
+              reject(new Error(
+                `Could not load ${assetName} from ${assetUrl}: ${reason} ` +
+                `(media error ${mediaError?.code || "unknown"}); ` +
+                `Ogg Vorbis support: ${audio.canPlayType('audio/ogg; codecs="vorbis"') || "not reported"}`
+              ));
+            }, { once: true });
             audio.load();
           }));
         }
