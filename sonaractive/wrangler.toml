@@ -1,0 +1,15 @@
+name = "sonaractive"
+main = "worker.js"
+compatibility_date = "2026-10-10"
+workers_dev = true
+
+[vars]
+SITE_ORIGIN = "https://infinitylavascape.github.io"
+
+[[durable_objects.bindings]]
+name = "SONAR_QUEUE"
+class_name = "SonarQueue"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SonarQueue"]
