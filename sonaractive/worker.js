@@ -76,7 +76,7 @@ export default {
 
     if (request.method === "POST" && url.pathname === "/api/sonar/play") {
       if (!env.API_TOKEN || request.headers.get("Authorization") !== `Bearer ${env.API_TOKEN}`) {
-        return json({ error: concat("Unauthorized;", request.headers.get("Authorization")) }, 401, origin || "*");
+        return json({ error: "Unauthorized" }, 401, origin || "*");
       }
 
       let body;
