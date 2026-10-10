@@ -63,4 +63,6 @@ end
 
 Store the token only in server-side code. Never place it in a LocalScript or the website.
 
-The sound file must be committed under `sonaractive/assets/` and use an `.ogg` filename. After the player enters their username, the page polls the Worker and plays matching queued assets from that folder.
+The sound file must be committed under `sonaractive/assets/` and use an `.ogg` filename. Add its filename to `sonaractive/assets/manifest.json` so the browser can preload it when listening starts. After the player enters their username, the page polls the Worker and plays matching queued assets from that folder.
+
+The browser drains the queue sequentially and waits for each sound file to become playable before starting it. Polling and HTTP round-trip time still add latency, so this is near-real-time rather than sample-accurate synchronization. If the Roblox server starts multiple `RequestAsync` calls concurrently, their arrival order can differ from the order the game triggered them; serialize those calls in the server script when event order matters.

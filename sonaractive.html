@@ -13,21 +13,91 @@
       const apiBase = "https://sonaractive.jacksonsteven212.workers.dev";
       const input = document.querySelector("textarea");
       const button = document.querySelector("button");
+      const loadedAssets = new Map();
       let listening = false;
+      let playbackQueue = Promise.resolve();
 
       function showListening() {
         document.body.innerHTML = '<div style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; color: white;">Listening...</div>';
       }
 
-      function playSound(assetName) {
+      function loadAsset(assetName) {
         if (typeof assetName !== "string" || !/^[\w.-]+\.ogg$/i.test(assetName)) {
-          console.error("Invalid Sonaractive asset name:", assetName);
-          return;
+          return Promise.reject(new Error(`Invalid Sonaractive asset name: ${assetName}`));
         }
 
-        const assetUrl = new URL(`sonaractive/assets/${encodeURIComponent(assetName)}`, document.baseURI);
-        const audio = new Audio(assetUrl);
-        audio.play().catch((error) => console.error("Audio playback error:", error));
+        if (!loadedAssets.has(assetName)) {
+          const assetUrl = new URL(`sonaractive/assets/${encodeURIComponent(assetName)}`, document.baseURI);
+          const audio = new Audio();
+          audio.preload = "auto";
+          audio.src = assetUrl;
+          loadedAssets.set(assetName, new Promise((resolve, reject) => {
+            if (audio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
+              resolve(audio);
+              return;
+            }
+            audio.addEventListener("canplay", () => resolve(audio), { once: true });
+            audio.addEventListener("error", () => reject(new Error(`Could not load audio asset: ${assetName}`)), { once: true });
+            audio.load();
+          }));
+        }
+
+        return loadedAssets.get(assetName);
+      }
+
+      function queueSound(assetName) {
+        playbackQueue = playbackQueue.then(async () => {
+          const template = await loadAsset(assetName);
+          const audio = template.cloneNode();
+          await audio.play();
+        }).catch((error) => {
+          console.error("Audio playback error:", error);
+        });
+      }
+
+      async function preloadAssets() {
+        try {
+          const response = await fetch(new URL("sonaractive/assets/manifest.json", document.baseURI), {
+            cache: "no-cache"
+          });
+          if (!response.ok) throw new Error(`Asset manifest request failed: ${response.status}`);
+          const assets = await response.json();
+          if (!Array.isArray(assets)) throw new Error("Asset manifest must contain a list of filenames");
+
+          await Promise.all(assets.map(async (assetName) => {
+            try {
+              await loadAsset(assetName);
+            } catch (error) {
+              console.error("Audio preload error:", error);
+            }
+          }));
+        } catch (error) {
+          console.error("Asset preload error:", error);
+        }
+      }
+
+      function delay(milliseconds) {
+        return new Promise((resolve) => setTimeout(resolve, milliseconds));
+      }
+
+      async function pollQueue(username) {
+        while (listening) {
+          try {
+            const response = await fetch(`${apiBase}/api/sonar/pull?username=${encodeURIComponent(username)}`, {
+              cache: "no-store"
+            });
+            if (!response.ok) throw new Error(`Sound request failed: ${response.status}`);
+            const data = await response.json();
+            if (data && data.asset) {
+              queueSound(data.asset);
+            } else {
+              await delay(200);
+            }
+          } catch (error) {
+            console.error("Pull error:", error);
+            await delay(1000);
+          }
+        }
       }
 
       async function registerListener() {
@@ -49,21 +119,8 @@
 
         listening = true;
         showListening();
-
-        setInterval(async () => {
-          try {
-            const response = await fetch(`${apiBase}/api/sonar/pull?username=${encodeURIComponent(username)}`, {
-              cache: "no-store"
-            });
-            if (!response.ok) throw new Error(`Sound request failed: ${response.status}`);
-            const data = await response.json();
-            if (data && data.asset) {
-              playSound(data.asset);
-            }
-          } catch (error) {
-            console.error("Pull error:", error);
-          }
-        }, 500);
+        void preloadAssets();
+        void pollQueue(username);
       }
 
       button.addEventListener("click", registerListener);
