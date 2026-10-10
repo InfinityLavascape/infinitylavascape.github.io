@@ -13,9 +13,11 @@
       const apiBase = "https://sonaractive.jacksonsteven212.workers.dev";
       const input = document.querySelector("textarea");
       const button = document.querySelector("button");
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
       const loadedAssets = new Map();
       let listening = false;
       let playbackQueue = Promise.resolve();
+      let reconnectDelay = 250;
 
       function showListening() {
         document.body.innerHTML = '<div style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; color: white;">Listening...</div>';
@@ -28,42 +30,34 @@
 
         if (!loadedAssets.has(assetName)) {
           const assetUrl = new URL(`sonaractive/assets/${encodeURIComponent(assetName)}`, document.baseURI);
-          const audio = new Audio();
-          audio.preload = "auto";
-          audio.src = assetUrl;
-          loadedAssets.set(assetName, new Promise((resolve, reject) => {
-            if (audio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
-              resolve(audio);
-              return;
-            }
-            audio.addEventListener("canplay", () => resolve(audio), { once: true });
-            audio.addEventListener("error", () => {
-              const mediaError = audio.error;
-              const errorNames = {
-                1: "aborted",
-                2: "network error",
-                3: "decode error",
-                4: "unsupported format or source"
-              };
-              const reason = errorNames[mediaError?.code] || "unknown media error";
-              reject(new Error(
-                `Could not load ${assetName} from ${assetUrl}: ${reason} ` +
-                `(media error ${mediaError?.code || "unknown"}); ` +
-                `Ogg Vorbis support: ${audio.canPlayType('audio/ogg; codecs="vorbis"') || "not reported"}`
-              ));
-            }, { once: true });
-            audio.load();
-          }));
+          const assetPromise = fetch(assetUrl, { cache: "force-cache" })
+            .then((response) => {
+              if (!response.ok) throw new Error(`Asset request failed: ${response.status} (${assetUrl})`);
+              return response.arrayBuffer();
+            })
+            .then((data) => audioContext.decodeAudioData(data));
+          loadedAssets.set(assetName, assetPromise);
+          assetPromise.catch(() => {
+            if (loadedAssets.get(assetName) === assetPromise) loadedAssets.delete(assetName);
+          });
         }
 
         return loadedAssets.get(assetName);
       }
 
-      function queueSound(assetName) {
+      function queueSound(event) {
         playbackQueue = playbackQueue.then(async () => {
-          const template = await loadAsset(assetName);
-          const audio = template.cloneNode();
-          await audio.play();
+          await audioContext.resume();
+          const buffer = await loadAsset(event.asset);
+          const source = audioContext.createBufferSource();
+          source.buffer = buffer;
+          source.connect(audioContext.destination);
+          source.start();
+          console.info(
+            `Sonaractive started ${event.asset}; ` +
+            `${Math.round(performance.now() - event.receivedAt)}ms from WebSocket event to start; ` +
+            `approximately ${Math.round(Date.now() - event.workerReceivedAt)}ms from Worker to start`
+          );
         }).catch((error) => {
           console.error("Audio playback error:", error);
         });
@@ -90,53 +84,56 @@
         }
       }
 
-      function delay(milliseconds) {
-        return new Promise((resolve) => setTimeout(resolve, milliseconds));
-      }
+      function connectWebSocket(username) {
+        if (!listening) return;
 
-      async function pollQueue(username) {
-        while (listening) {
+        const socketUrl = new URL("/api/sonar/connect", apiBase);
+        socketUrl.protocol = socketUrl.protocol === "https:" ? "wss:" : "ws:";
+        socketUrl.searchParams.set("username", username);
+
+        const socket = new WebSocket(socketUrl);
+        socket.addEventListener("open", () => {
+          reconnectDelay = 250;
+          console.info("Sonaractive live connection open");
+        }, { once: true });
+        socket.addEventListener("message", (event) => {
           try {
-            const response = await fetch(`${apiBase}/api/sonar/pull?username=${encodeURIComponent(username)}`, {
-              cache: "no-store"
-            });
-            if (!response.ok) throw new Error(`Sound request failed: ${response.status}`);
-            const data = await response.json();
+            const data = JSON.parse(event.data);
             if (data && data.asset) {
-              queueSound(data.asset);
-            } else {
-              await delay(200);
+              queueSound({
+                asset: data.asset,
+                receivedAt: performance.now(),
+                workerReceivedAt: data.workerReceivedAt || Date.now()
+              });
             }
+            else console.error("Invalid sound event received:", data);
           } catch (error) {
-            console.error("Pull error:", error);
-            await delay(1000);
+            console.error("Could not process sound event:", error);
           }
-        }
+        });
+        socket.addEventListener("close", () => {
+          if (!listening) return;
+          const delay = reconnectDelay;
+          reconnectDelay = Math.min(reconnectDelay * 2, 5000);
+          setTimeout(() => connectWebSocket(username), delay);
+        }, { once: true });
+        socket.addEventListener("error", () => socket.close(), { once: true });
       }
 
-      async function registerListener() {
+      function registerListener() {
         if (listening) return;
         const username = input.value.trim();
         if (!username) return;
 
-        try {
-          const response = await fetch(`${apiBase}/api/sonar/register`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ username })
-          });
-          if (!response.ok) throw new Error(`Registration failed: ${response.status}`);
-        } catch (error) {
-          console.error("Register error:", error);
-          return;
-        }
-
         listening = true;
+        void audioContext.resume().catch((error) => {
+          console.error("Could not start audio context:", error);
+        });
         showListening();
-        void preloadAssets();
-        void pollQueue(username);
+        connectWebSocket(username);
       }
 
+      void preloadAssets();
       button.addEventListener("click", registerListener);
       input.addEventListener("keydown", (event) => {
         if (event.key === "Enter") {

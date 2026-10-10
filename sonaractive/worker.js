@@ -74,6 +74,18 @@ export default {
       }).then(async (response) => json(await response.json(), response.status, origin));
     }
 
+    if (request.method === "GET" && url.pathname === "/api/sonar/connect") {
+      if (!origin) return json({ error: "Origin not allowed" }, 403);
+      const username = usernameFrom(url.searchParams.get("username"));
+      if (!username) return json({ error: "Invalid username" }, 400, origin);
+      if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+        return json({ error: "WebSocket upgrade required" }, 426, origin);
+      }
+
+      const id = env.SONAR_QUEUE.idFromName(username);
+      return env.SONAR_QUEUE.get(id).fetch(request);
+    }
+
     if (request.method === "POST" && url.pathname === "/api/sonar/play") {
       if (!env.API_TOKEN || request.headers.get("Authorization") !== `Bearer ${env.API_TOKEN}`) {
         return json({ error: "Unauthorized" }, 401, origin || "*");
@@ -92,12 +104,13 @@ export default {
       if (typeof asset !== "string" || !ASSET_PATTERN.test(asset)) {
         return json({ error: "Invalid asset filename" }, 400, origin || "*");
       }
+      const workerReceivedAt = Date.now();
 
       const id = env.SONAR_QUEUE.idFromName(username);
       return env.SONAR_QUEUE.get(id).fetch("https://queue/push", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ asset })
+        body: JSON.stringify({ asset, workerReceivedAt })
       }).then(async (response) => json(await response.json(), response.status, origin || "*"));
     }
 
@@ -111,16 +124,59 @@ export class SonarQueue {
   }
 
   async fetch(request) {
+    const url = new URL(request.url);
+
+    if (request.method === "GET" && url.pathname === "/api/sonar/connect") {
+      const pair = new WebSocketPair();
+      const [client, server] = Object.values(pair);
+      this.state.acceptWebSocket(server);
+
+      const queued = await this.state.storage.transaction(async (transaction) => {
+        const queue = await transaction.get("queue") || [];
+        await transaction.delete("queue");
+        return queue;
+      });
+
+      try {
+        for (const event of queued) server.send(JSON.stringify(event));
+      } catch (error) {
+        await this.state.storage.transaction(async (transaction) => {
+          const queue = await transaction.get("queue") || [];
+          await transaction.put("queue", queued.concat(queue).slice(-MAX_QUEUE_LENGTH));
+        });
+        server.close(1011, "Could not deliver queued sounds");
+        console.error("Could not send queued sounds to listener:", error);
+        return new Response(null, { status: 503 });
+      }
+
+      return new Response(null, { status: 101, webSocket: client });
+    }
+
     if (request.method !== "POST") {
       return Response.json({ error: "Method not allowed" }, { status: 405 });
     }
 
-    if (new URL(request.url).pathname === "/push") {
-      const { asset } = await request.json();
+    if (url.pathname === "/push") {
+      const event = await request.json();
+      const sockets = this.state.getWebSockets();
+      let delivered = false;
+
+      for (const socket of sockets) {
+        if (socket.readyState !== WebSocket.OPEN) continue;
+        try {
+          socket.send(JSON.stringify(event));
+          delivered = true;
+        } catch (error) {
+          console.error("Could not send sound to listener:", error);
+        }
+      }
+
+      if (delivered) return Response.json({ ok: true, delivered: true });
+
       const result = await this.state.storage.transaction(async (transaction) => {
         const queue = await transaction.get("queue") || [];
         if (queue.length >= MAX_QUEUE_LENGTH) return { full: true };
-        queue.push({ asset });
+        queue.push(event);
         await transaction.put("queue", queue);
         return { full: false };
       });
@@ -130,7 +186,7 @@ export class SonarQueue {
       });
     }
 
-    if (new URL(request.url).pathname === "/pull") {
+    if (url.pathname === "/pull") {
       const asset = await this.state.storage.transaction(async (transaction) => {
         const queue = await transaction.get("queue") || [];
         const next = queue.shift() || null;

@@ -27,7 +27,7 @@ This free-tier Cloudflare Worker relays sound requests from a Roblox server to a
 
 6. In `sonaractive.html`, replace `YOUR-ACCOUNT` in `apiBase` with the exact account subdomain Wrangler printed. Commit and push the page change to GitHub Pages.
 
-The Worker allows browser requests from `https://qtulip.io`, the site's configured custom domain. If the page is accessed from a different origin, update `SITE_ORIGIN` in `wrangler.toml` to that origin and redeploy.
+The Worker allows browser connections from `https://infinitylavascape.github.io`, the site's GitHub Pages origin. If the page is accessed from a different origin, update `SITE_ORIGIN` in `wrangler.toml` to that origin and redeploy.
 
 ## Roblox server request
 
@@ -63,6 +63,6 @@ end
 
 Store the token only in server-side code. Never place it in a LocalScript or the website.
 
-The sound file must be committed under `sonaractive/assets/` and use an `.ogg` filename. Add its filename to `sonaractive/assets/manifest.json` so the browser can preload it when listening starts. After the player enters their username, the page polls the Worker and plays matching queued assets from that folder.
+The sound file must be committed under `sonaractive/assets/` and use an `.ogg` filename. Add its filename to `sonaractive/assets/manifest.json` so the browser can fetch and decode it when listening starts. The page opens a WebSocket to the Worker after the player enters their username; the Durable Object pushes sounds over that connection instead of waiting for the browser's next polling request.
 
-The browser drains the queue sequentially and waits for each sound file to become playable before starting it. Polling and HTTP round-trip time still add latency, so this is near-real-time rather than sample-accurate synchronization. If the Roblox server starts multiple `RequestAsync` calls concurrently, their arrival order can differ from the order the game triggered them; serialize those calls in the server script when event order matters.
+The browser caches decoded audio buffers and starts playback as soon as a sound event arrives. The console logs the time between receiving the WebSocket event and scheduling playback; this excludes the Roblox-to-Worker network time and physical audio output latency. WebSockets remove the old polling interval, but network and browser scheduling mean this is not sample-accurate synchronization. If the Roblox server starts multiple `RequestAsync` calls concurrently, their arrival order can differ from the order the game triggered them; serialize those calls in the server script when event order matters.
