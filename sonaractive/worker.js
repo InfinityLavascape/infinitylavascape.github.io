@@ -1,6 +1,8 @@
 const USERNAME_PATTERN = /^[A-Za-z0-9_]{3,20}$/;
 const ASSET_PATTERN = /^[\w.-]+\.ogg$/i;
+const PLAYBACK_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,64}$/;
 const MAX_QUEUE_LENGTH = 50;
+const MAX_TWEEN_SECONDS = 60;
 
 function json(data, status = 200, origin = "*") {
   return new Response(JSON.stringify(data), {
@@ -26,6 +28,58 @@ function usernameFrom(value) {
   if (typeof value !== "string") return null;
   const username = value.trim();
   return USERNAME_PATTERN.test(username) ? username.toLowerCase() : null;
+}
+
+function validateCommand(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return { error: "Request body must be a JSON object" };
+  }
+
+  const command = body.command;
+  if (!["play", "pause", "resume", "stop", "volume"].includes(command)) {
+    return { error: "Invalid command" };
+  }
+  if (typeof body.playbackId !== "string" || !PLAYBACK_ID_PATTERN.test(body.playbackId)) {
+    return { error: "Invalid playbackId" };
+  }
+
+  if (command === "play") {
+    if (typeof body.sound !== "string" || !ASSET_PATTERN.test(body.sound)) {
+      return { error: "Invalid sound filename" };
+    }
+    if (body.volume !== undefined && (
+      typeof body.volume !== "number" || !Number.isFinite(body.volume) ||
+      body.volume < 0 || body.volume > 1
+    )) {
+      return { error: "Play volume must be between 0 and 1" };
+    }
+    return {
+      command,
+      playbackId: body.playbackId,
+      sound: body.sound,
+      volume: body.volume ?? 1
+    };
+  }
+
+  if (command === "volume") {
+    if (typeof body.value !== "number" || !Number.isFinite(body.value) ||
+      body.value < 0 || body.value > 1) {
+      return { error: "Volume value must be between 0 and 1" };
+    }
+    const mode = body.mode ?? "set";
+    if (mode !== "set" && mode !== "tween") {
+      return { error: "Volume mode must be set or tween" };
+    }
+    const duration = body.duration ?? 0;
+    if (typeof duration !== "number" || !Number.isFinite(duration) ||
+      duration < 0 || duration > MAX_TWEEN_SECONDS ||
+      (mode === "tween" && duration <= 0)) {
+      return { error: `Volume duration must be between 0 and ${MAX_TWEEN_SECONDS} seconds` };
+    }
+    return { command, playbackId: body.playbackId, value: body.value, mode, duration };
+  }
+
+  return { command, playbackId: body.playbackId };
 }
 
 export default {
@@ -86,7 +140,8 @@ export default {
       return env.SONAR_QUEUE.get(id).fetch(request);
     }
 
-    if (request.method === "POST" && url.pathname === "/api/sonar/play") {
+    if (request.method === "POST" &&
+      (url.pathname === "/api/sonar/play" || url.pathname === "/api/sonar/command")) {
       if (!env.API_TOKEN || request.headers.get("Authorization") !== `Bearer ${env.API_TOKEN}`) {
         return json({ error: "Unauthorized" }, 401, origin || "*");
       }
@@ -99,18 +154,24 @@ export default {
       }
 
       const username = usernameFrom(body?.username);
-      const asset = body?.asset;
       if (!username) return json({ error: "Invalid username" }, 400, origin || "*");
-      if (typeof asset !== "string" || !ASSET_PATTERN.test(asset)) {
-        return json({ error: "Invalid asset filename" }, 400, origin || "*");
-      }
-      const workerReceivedAt = Date.now();
+      const commandBody = url.pathname === "/api/sonar/play"
+        ? {
+          command: "play",
+          playbackId: typeof body.playbackId === "string" ? body.playbackId : crypto.randomUUID(),
+          sound: body.asset
+        }
+        : body;
+      const command = validateCommand(commandBody);
+      if (command.error) return json({ error: command.error }, 400, origin || "*");
+      const event = { ...command, workerReceivedAt: Date.now() };
+      if (command.command === "play") event.asset = command.sound;
 
       const id = env.SONAR_QUEUE.idFromName(username);
       return env.SONAR_QUEUE.get(id).fetch("https://queue/push", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ asset, workerReceivedAt })
+        body: JSON.stringify(event)
       }).then(async (response) => json(await response.json(), response.status, origin || "*"));
     }
 

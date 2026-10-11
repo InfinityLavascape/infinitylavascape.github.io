@@ -15,6 +15,7 @@
       const button = document.querySelector("button");
       const audioContext = new (window.AudioContext || window.webkitAudioContext)();
       const loadedAssets = new Map();
+      const activeSounds = new Map();
       let listening = false;
       let playbackQueue = Promise.resolve();
       let reconnectDelay = 250;
@@ -45,21 +46,99 @@
         return loadedAssets.get(assetName);
       }
 
-      function queueSound(event) {
-        playbackQueue = playbackQueue.then(async () => {
-          await audioContext.resume();
-          const buffer = await loadAsset(event.asset);
-          const source = audioContext.createBufferSource();
-          source.buffer = buffer;
-          source.connect(audioContext.destination);
-          source.start();
+      function stopSound(playbackId) {
+        const sound = activeSounds.get(playbackId);
+        if (!sound) return;
+        activeSounds.delete(playbackId);
+        if (sound.source) {
+          const source = sound.source;
+          sound.source = null;
+          source.stop();
+        }
+      }
+
+      function startSoundSource(playbackId, sound, offset) {
+        const source = audioContext.createBufferSource();
+        source.buffer = sound.buffer;
+        source.connect(sound.gain);
+        sound.source = source;
+        sound.offset = offset;
+        sound.startedAt = audioContext.currentTime;
+        sound.paused = false;
+        source.onended = () => {
+          if (sound.source === source) activeSounds.delete(playbackId);
+        };
+        source.start(0, offset);
+      }
+
+      async function handleCommand(event) {
+        const playbackId = event.playbackId;
+        if (typeof playbackId !== "string") {
+          console.error("Sound command is missing its playbackId:", event);
+          return;
+        }
+
+        if (event.command === "play") {
+          stopSound(playbackId);
+          const buffer = await loadAsset(event.sound || event.asset);
+          const gain = audioContext.createGain();
+          gain.gain.value = event.volume ?? 1;
+          gain.connect(audioContext.destination);
+          const sound = { buffer, gain, source: null, offset: 0, startedAt: 0, paused: false };
+          activeSounds.set(playbackId, sound);
+          startSoundSource(playbackId, sound, 0);
           console.info(
-            `Sonaractive started ${event.asset}; ` +
+            `Sonaractive started ${event.sound || event.asset}; ` +
             `${Math.round(performance.now() - event.receivedAt)}ms from WebSocket event to start; ` +
             `approximately ${Math.round(Date.now() - event.workerReceivedAt)}ms from Worker to start`
           );
+          return;
+        }
+
+        const sound = activeSounds.get(playbackId);
+        if (!sound) {
+          console.warn(`Sonaractive ${event.command} ignored; no active sound ${playbackId}`);
+          return;
+        }
+
+        if (event.command === "pause" && sound.source) {
+          sound.offset = (sound.offset + audioContext.currentTime - sound.startedAt) % sound.buffer.duration;
+          const source = sound.source;
+          sound.source = null;
+          sound.paused = true;
+          source.stop();
+        } else if (event.command === "resume" && sound.paused) {
+          startSoundSource(playbackId, sound, sound.offset);
+        } else if (event.command === "stop") {
+          stopSound(playbackId);
+        } else if (event.command === "volume") {
+          const now = audioContext.currentTime;
+          const parameter = sound.gain.gain;
+          if (typeof parameter.cancelAndHoldAtTime === "function") {
+            parameter.cancelAndHoldAtTime(now);
+          } else {
+            parameter.cancelScheduledValues(now);
+            parameter.setValueAtTime(parameter.value, now);
+          }
+          if (event.mode === "tween") {
+            parameter.linearRampToValueAtTime(event.value, now + event.duration);
+          } else {
+            parameter.setValueAtTime(event.value, now);
+          }
+        }
+      }
+
+      function queueCommand(event) {
+        playbackQueue = playbackQueue.then(async () => {
+          await audioContext.resume();
+          await handleCommand({
+            ...event,
+            command: event.command || (event.asset ? "play" : undefined),
+            sound: event.sound || event.asset,
+            receivedAt: performance.now()
+          });
         }).catch((error) => {
-          console.error("Audio playback error:", error);
+          console.error("Audio command error:", error);
         });
       }
 
@@ -99,14 +178,23 @@
         socket.addEventListener("message", (event) => {
           try {
             const data = JSON.parse(event.data);
-            if (data && data.asset) {
-              queueSound({
-                asset: data.asset,
-                receivedAt: performance.now(),
+            if (data && data.command) {
+              queueCommand({
+                ...data,
+                playbackId: data.playbackId || crypto.randomUUID(),
                 workerReceivedAt: data.workerReceivedAt || Date.now()
               });
             }
-            else console.error("Invalid sound event received:", data);
+            else if (data && data.asset) {
+              queueCommand({
+                ...data,
+                command: "play",
+                playbackId: data.playbackId || crypto.randomUUID(),
+                sound: data.asset
+              });
+            } else {
+              console.error("Invalid sound event received:", data);
+            }
           } catch (error) {
             console.error("Could not process sound event:", error);
           }

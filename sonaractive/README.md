@@ -29,40 +29,32 @@ This free-tier Cloudflare Worker relays sound requests from a Roblox server to a
 
 The Worker allows browser connections from `https://infinitylavascape.github.io`, the site's GitHub Pages origin. If the page is accessed from a different origin, update `SITE_ORIGIN` in `wrangler.toml` to that origin and redeploy.
 
-## Roblox server request
+## Roblox commands
 
-Enable **Allow HTTP Requests** in the Roblox experience's security settings. From a server Script, send the Roblox player's username and an asset filename (not a URL or filesystem path):
+Enable **Allow HTTP Requests** in the Roblox experience's security settings. The included `demo.luau` is a server Script for `ServerScriptService`; it listens to the `ReplicatedStorage.Sonaractive` RemoteEvent. Set `API_TOKEN` in that server-only script. Never put the token in a LocalScript or share it with clients.
 
 ```lua
-local HttpService = game:GetService("HttpService")
-
-local API_URL = "https://sonaractive-api.YOUR-ACCOUNT.workers.dev"
-local API_TOKEN = "YOUR_API_TOKEN"
-
-local function playForPlayer(player, assetName)
-    local response = HttpService:RequestAsync({
-        Url = API_URL .. "/api/sonar/play",
-        Method = "POST",
-        Headers = {
-            ["Content-Type"] = "application/json",
-            ["Authorization"] = "Bearer " .. API_TOKEN
-        },
-        Body = HttpService:JSONEncode({
-            username = player.Name,
-            asset = assetName
-        })
-    })
-
-    if not response.Success then
-        warn("Sonaractive API request failed:", response.StatusCode, response.Body)
-    end
-end
-
--- Call playForPlayer(player, "act3.intro.ogg") when the game should play the sound.
+-- In a LocalScript, after requiring the RemoteEvent:
+Sonaractive:FireServer("play", {
+    playbackId = "intro",
+    sound = "act3.intro.ogg",
+    volume = 1,
+})
+Sonaractive:FireServer("pause", { playbackId = "intro" })
+Sonaractive:FireServer("resume", { playbackId = "intro" })
+Sonaractive:FireServer("volume", {
+    playbackId = "intro",
+    value = 0.25,
+    mode = "tween",
+    duration = 1,
+})
+Sonaractive:FireServer("stop", { playbackId = "intro" })
 ```
 
-Store the token only in server-side code. Never place it in a LocalScript or the website.
+The server forwards each command as an authenticated `POST /api/sonar/command` JSON request. Every play must use a unique or reusable `playbackId`; pause, resume, volume, and stop target that ID. Filenames are names of `.ogg` files in the site's asset folder. Volume values must be from `0` to `1`; volume mode is `set` or `tween`, and tween duration is limited to 60 seconds.
 
-The sound file must be committed under `sonaractive/assets/` and use an `.ogg` filename. Add its filename to `sonaractive/assets/manifest.json` so the browser can fetch and decode it when listening starts. The page opens a WebSocket to the Worker after the player enters their username; the Durable Object pushes sounds over that connection instead of waiting for the browser's next polling request.
+The original `Sonaractive:FireServer("act3.intro.ogg")` event format remains supported and starts a play with an auto-generated ID; send the new command table format when you need to control the same playback later.
 
-The browser caches decoded audio buffers and starts playback as soon as a sound event arrives. The console logs the time between receiving the WebSocket event and scheduling playback; this excludes the Roblox-to-Worker network time and physical audio output latency. WebSockets remove the old polling interval, but network and browser scheduling mean this is not sample-accurate synchronization. If the Roblox server starts multiple `RequestAsync` calls concurrently, their arrival order can differ from the order the game triggered them; serialize those calls in the server script when event order matters.
+The sound file must be committed under `sonaractive/assets/` and use an `.ogg` filename. Add its filename to `sonaractive/assets/manifest.json` so the browser can fetch and decode it when listening starts. The page caches decoded audio buffers and applies play, pause, resume, stop, and volume commands to active browser audio instances. WebSockets push those commands to the page; network and browser scheduling still mean this is not sample-accurate synchronization.
+
+The included demo accepts client RemoteEvent commands; Roblox clients can invoke these freely, so add your own server-side permission checks before letting untrusted players trigger sounds or controls.
